@@ -15,10 +15,17 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
+    // @types/node so the shared crypto's Buffer fallback branch type-checks;
+    // vitest for our own *.test.ts. DOM lib covers btoa/atob/WebCrypto.
+    "types": ["node", "vitest/globals"],
     "baseUrl": ".",
     "paths": {
       "@shared/*": ["../desktop/src/shared/*"]
     }
   },
-  "include": ["src", "../desktop/src/shared"]
+  "include": ["src"],
+  // Only our own source is compiled from web/. The shared modules are pulled in
+  // transitively via the @shared alias; the desktop's *.test.ts files are never
+  // referenced by web source, so they are not type-checked here.
+  "exclude": ["node_modules", "dist"]
 }
