@@ -1,12 +1,15 @@
 name: Deploy web demo to Pages
 
-# Builds the standalone web client and publishes it to GitHub Pages, giving the
-# project a real, clickable "open two tabs and send a file" demo. The bundle is
-# fully static (relative asset paths) and the demo runs with no backend at all.
+# Publishes the standalone web client to GitHub Pages, giving the project a
+# real, clickable "open two tabs and send a file" demo. The bundle is fully
+# static (relative asset paths) and the demo runs with no backend at all.
+#
+# This is MANUAL (workflow_dispatch) on purpose: GitHub Pages must be enabled
+# once for the repo (Settings → Pages → Source: GitHub Actions), after which a
+# single "Run workflow" click publishes the demo. Keeping it off the push
+# trigger means it never reds the commit status before Pages is set up.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -26,12 +29,7 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
-        with:
-          # Self-enable Pages for this repo so the demo publishes without a
-          # manual settings toggle.
-          enablement: true
+      - uses: actions/configure-pages@v5
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -40,7 +38,7 @@ jobs:
       - run: npm ci
       - name: Build static bundle
         run: npm run build
-      - name: Add SPA + demo landing niceties
+      - name: SPA fallback
         run: cp dist/index.html dist/404.html
       - uses: actions/upload-pages-artifact@v3
         with:

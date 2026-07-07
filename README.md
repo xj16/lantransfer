@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/xj16/lantransfer/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/xj16/lantransfer/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://xj16.github.io/lantransfer/?demo=1"><img alt="Live demo" src="https://img.shields.io/badge/live%20demo-open%20two%20tabs-4f8cff"></a>
+  <a href="web/"><img alt="Live demo" src="https://img.shields.io/badge/demo-open%20two%20tabs-4f8cff"></a>
   <img alt="Coverage" src="https://img.shields.io/badge/shared%20core%20coverage-~87%25-3fb950">
   <img alt="Protocol" src="https://img.shields.io/badge/protocol-v2-blueviolet">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-informational"></a>
@@ -22,11 +22,12 @@ Think AirDrop, but it works between Windows, macOS, Linux, Android, iOS, **and
 any browser** — and you own the whole stack: an Electron desktop app, a Flutter
 mobile app, a browser client, and a Go relay, all speaking one wire protocol.
 
-> **▶ Try it now, no install:** open the
-> [**live demo**](https://xj16.github.io/lantransfer/?demo=1) in **two browser
-> tabs** and send a file between them. Signaling runs over a `BroadcastChannel`
-> between the tabs, so a **real file** flows through the **real ECDH + AES-256-GCM
-> + chunking path** with no server at all.
+> **▶ Try it in 30 seconds, no server:** `cd web && npm install && npm run dev`,
+> then open the printed URL with **`?demo=1` in two browser tabs** and send a
+> file between them. Signaling runs over a `BroadcastChannel` between the tabs,
+> so a **real file** flows through the **real ECDH + AES-256-GCM + chunking
+> path** with no relay at all. (Enable GitHub Pages and run the *Deploy web demo*
+> workflow to host it publicly.)
 
 ---
 
@@ -116,16 +117,16 @@ truth for the security-critical code.
 
 ## Quick start
 
-### Try the demo (nothing to install)
-
-Open the [live demo](https://xj16.github.io/lantransfer/?demo=1) in two tabs, or
-run it locally:
+### Try the demo (no server needed)
 
 ```bash
 cd web
 npm install
 npm run dev        # then open the printed URL with ?demo=1 in two tabs
 ```
+
+To host it publicly: enable **Settings → Pages → GitHub Actions**, then run the
+**Deploy web demo to Pages** workflow — it publishes the standalone bundle.
 
 ### Run the relay
 

@@ -20,7 +20,8 @@ undetected — and adds a real, server-free browser demo.
 - **Live, zero-backend demo.** With `?demo=1`, signaling runs over a
   `BroadcastChannel` between browser tabs, so two tabs pair and transfer a
   **real file through the real ECDH + AES-256-GCM + chunking path** with no
-  relay at all. Deployed to GitHub Pages via a new workflow.
+  relay at all. A one-click *Deploy web demo to Pages* workflow publishes the
+  standalone bundle once GitHub Pages is enabled.
 - **Animated transfer visualization.** A packet-flow lane that fills as chunks
   stream, a live MB/s sparkline (dependency-free inline SVG), an encryption
   shield that flips to “verified” when the SAS is known, and a checksum-verified
