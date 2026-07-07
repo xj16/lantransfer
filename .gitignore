@@ -9,6 +9,13 @@ build/
 out/
 *.tsbuildinfo
 
+# Coverage reports
+coverage/
+*.lcov
+
+# Claude Code local settings (keep launch.json; ignore local overrides)
+.claude/settings.local.json
+
 # Electron packaging
 release/
 app-builds/

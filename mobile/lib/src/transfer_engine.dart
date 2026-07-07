@@ -13,6 +13,7 @@ import 'crypto.dart';
 import 'protocol.dart';
 
 typedef SendSealed = void Function(String sealed);
+typedef SendBinary = void Function(Uint8List frame);
 typedef TransferUpdate = void Function(TransferInfo info);
 typedef IncomingPrompt = Future<bool> Function(TransferInfo info);
 typedef FileComplete = void Function(String name, Uint8List bytes);
@@ -34,6 +35,7 @@ class TransferEngine {
   TransferEngine({
     required this.cipher,
     required this.send,
+    required this.sendBinary,
     required this.onUpdate,
     required this.onIncoming,
     required this.onComplete,
@@ -43,6 +45,7 @@ class TransferEngine {
 
   final SessionCipher cipher;
   final SendSealed send;
+  final SendBinary sendBinary;
   final TransferUpdate onUpdate;
   final IncomingPrompt onIncoming;
   final FileComplete onComplete;
@@ -70,7 +73,7 @@ class TransferEngine {
     return id;
   }
 
-  /// Feed a raw (still-sealed) frame received from the data channel.
+  /// Feed a raw (still-sealed) JSON control frame received from the channel.
   Future<void> onChannelData(String sealed) async {
     late ChannelMessage msg;
     try {
@@ -80,6 +83,18 @@ class TransferEngine {
       return; // undecryptable / tampered frame
     }
     await _dispatch(msg);
+  }
+
+  /// Feed a raw (still-sealed) binary chunk frame received from the channel
+  /// (protocol v2). Silently drops anything that fails to decrypt or decode.
+  Future<void> onBinaryData(Uint8List sealed) async {
+    try {
+      final plain = await cipher.openBytes(sealed);
+      final frame = decodeChunkFrame(plain);
+      if (frame != null) _onChunkFrame(frame);
+    } catch (_) {
+      return; // undecryptable / tampered frame
+    }
   }
 
   Future<void> _emit(ChannelMessage msg) async {
@@ -99,9 +114,6 @@ class TransferEngine {
       case 'reject-file':
         _mark(id, TransferState.rejected);
         _outgoing.remove(id);
-        break;
-      case 'chunk':
-        _onChunk(msg);
         break;
       case 'complete':
         _onComplete(msg);
@@ -150,10 +162,14 @@ class TransferEngine {
     var offset = 0;
     var seq = 0;
     while (offset < out.bytes.length) {
+      if (out.info.state == TransferState.cancelled) return;
       final end = (offset + chunkSize).clamp(0, out.bytes.length);
       final slice = Uint8List.sublistView(out.bytes, offset, end);
       final last = end >= out.bytes.length;
-      await _emit(ChannelMessage.chunk(id, seq, last, toBase64Url(slice)));
+      // Protocol v2: chunks travel as sealed binary frames, not JSON strings.
+      final framed = encodeChunkFrame(ChunkFrame(id, seq, last, slice));
+      final sealed = await cipher.sealBytes(framed);
+      sendBinary(sealed);
       offset = end;
       seq++;
       out.info.transferred = offset;
@@ -165,11 +181,10 @@ class TransferEngine {
     _outgoing.remove(id);
   }
 
-  void _onChunk(ChannelMessage msg) {
-    final id = msg.fields['transferId'] as String;
-    final inc = _incoming[id];
+  void _onChunkFrame(ChunkFrame frame) {
+    final inc = _incoming[frame.transferId];
     if (inc == null) return;
-    final bytes = fromBase64Url(msg.fields['data'] as String);
+    final bytes = Uint8List.fromList(frame.data);
     inc.chunks.add(bytes);
     inc.received += bytes.length;
     inc.info.transferred = inc.received;

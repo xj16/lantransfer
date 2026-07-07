@@ -26,9 +26,16 @@ Uint8List fromBase64Url(String s) {
 
 /// A keyed session cipher. [seal]/[open] operate on UTF-8 strings, producing
 /// and consuming the nonce||ciphertext base64url format shared with desktop.
+///
+/// [sealBytes]/[openBytes] are the binary hot path (protocol v2): they produce
+/// and consume the raw `nonce(12) || ciphertext || tag(16)` byte blob with no
+/// base64 layer, matching the desktop `sealBytes`/`openBytes` exactly so file
+/// chunks can travel as binary WebRTC data-channel frames.
 abstract class SessionCipher {
   Future<String> seal(String plaintext);
   Future<String> open(String sealed);
+  Future<Uint8List> sealBytes(Uint8List plaintext);
+  Future<Uint8List> openBytes(Uint8List sealed);
 }
 
 /// Establishes a [SessionCipher] from an ECDH handshake. The concrete platform
@@ -45,6 +52,117 @@ abstract class KeyAgreement {
 /// SHA-256 helper used to verify a completed transfer's integrity.
 /// Implemented with a pure-Dart routine so it needs no native dependency.
 String sha256Hex(Uint8List data) => _Sha256().update(data).finishHex();
+
+/// SHA-256 raw digest bytes (32 bytes). Used by the Short Authentication String.
+Uint8List sha256Bytes(Uint8List data) => _Sha256().update(data).finishBytes();
+
+// ---------------------------------------------------------------------------
+// Short Authentication String (SAS) — mirror of desktop deriveSAS().
+//
+// Binds both peers' *public* keys (as each side observed them) into a short,
+// human-comparable fingerprint. A key-swapping relay makes the two sides derive
+// different strings, so an out-of-band comparison detects the man-in-the-middle
+// that the ECDH handshake alone cannot.
+// ---------------------------------------------------------------------------
+
+class Sas {
+  const Sas(this.emoji, this.digits);
+  final List<String> emoji;
+  final String digits;
+}
+
+// Must match SAS_EMOJI in desktop/src/shared/crypto.ts, index-for-index.
+const List<String> _sasEmoji = [
+  '🐶', '🐱', '🦊', '🐻', '🐼', '🐨', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵',
+  '🐔', '🐧', '🦆', '🦉', '🦄', '🐝', '🐢', '🐙', '🦀', '🐬', '🐳', '🐠',
+  '🌵', '🌲', '🍁', '🌸', '🌻', '🍀', '🍄', '🌍', '🌙', '⭐', '⚡', '🔥',
+  '❄️', '🌈', '☂️', '⚓', '🎈', '🎁', '🔑', '🔔', '🎸', '🎺', '🥁', '🎨',
+  '🍎', '🍊', '🍋', '🍇', '🍓', '🍒', '🍑', '🥝', '🌶️', '🌽', '🍞', '🧀',
+  '🚀', '⛵', '🚲', '🎡',
+];
+
+/// Derive the Short Authentication String from both peers' base64url public
+/// keys. Order-independent: the keys are sorted before hashing so both peers
+/// compute the identical SAS.
+Sas deriveSas(String ownPublicB64, String peerPublicB64) {
+  final pair = [ownPublicB64, peerPublicB64]..sort();
+  final material = Uint8List.fromList(
+    utf8.encode('lantransfer/v1/sas\n${pair[0]}\n${pair[1]}'),
+  );
+  final digest = sha256Bytes(material);
+
+  final emoji = <String>[
+    _sasEmoji[digest[0] >> 2],
+    _sasEmoji[((digest[0] & 0x03) << 4) | (digest[1] >> 4)],
+    _sasEmoji[((digest[1] & 0x0f) << 2) | (digest[2] >> 6)],
+    _sasEmoji[digest[2] & 0x3f],
+  ];
+
+  final num = ((digest[3] << 16) | (digest[4] << 8) | digest[5]) % 1000000;
+  final digits = num.toString().padLeft(6, '0');
+
+  return Sas(emoji, digits);
+}
+
+// ---------------------------------------------------------------------------
+// Binary chunk frame codec (protocol v2) — mirror of desktop encode/decode.
+//
+//   [0]      magic 0x5A
+//   [1]      flags: bit0 = last
+//   [2..5]   seq (uint32 big-endian)
+//   [6..21]  transferId (16 raw bytes)
+//   [22..]   raw chunk bytes
+// ---------------------------------------------------------------------------
+
+const int binaryFrameMagic = 0x5a;
+const int _frameHeaderLen = 22;
+
+class ChunkFrame {
+  const ChunkFrame(this.transferId, this.seq, this.last, this.data);
+  final String transferId;
+  final int seq;
+  final bool last;
+  final Uint8List data;
+}
+
+/// Encode a chunk into the compact binary frame (plaintext, pre-encryption).
+Uint8List encodeChunkFrame(ChunkFrame frame) {
+  final out = Uint8List(_frameHeaderLen + frame.data.length);
+  out[0] = binaryFrameMagic;
+  out[1] = frame.last ? 0x01 : 0x00;
+  out[2] = (frame.seq >> 24) & 0xff;
+  out[3] = (frame.seq >> 16) & 0xff;
+  out[4] = (frame.seq >> 8) & 0xff;
+  out[5] = frame.seq & 0xff;
+  final id = _hexToBytes(frame.transferId, 16);
+  out.setRange(6, 6 + 16, id);
+  out.setRange(_frameHeaderLen, out.length, frame.data);
+  return out;
+}
+
+/// Decode a binary chunk frame, or null if the magic byte doesn't match.
+ChunkFrame? decodeChunkFrame(Uint8List bytes) {
+  if (bytes.length < _frameHeaderLen || bytes[0] != binaryFrameMagic) return null;
+  final last = (bytes[1] & 0x01) == 0x01;
+  final seq = (bytes[2] << 24) | (bytes[3] << 16) | (bytes[4] << 8) | bytes[5];
+  final transferId = _bytesToHex(Uint8List.sublistView(bytes, 6, 22));
+  final data = Uint8List.sublistView(bytes, _frameHeaderLen);
+  return ChunkFrame(transferId, seq, last, data);
+}
+
+Uint8List _hexToBytes(String hex, int len) {
+  final out = Uint8List(len);
+  for (var i = 0; i < len; i++) {
+    final j = i * 2;
+    if (j + 2 <= hex.length) {
+      out[i] = int.tryParse(hex.substring(j, j + 2), radix: 16) ?? 0;
+    }
+  }
+  return out;
+}
+
+String _bytesToHex(Uint8List bytes) =>
+    bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
 // ---------------------------------------------------------------------------
 // Minimal, dependency-free SHA-256 (FIPS 180-4). Used only for the integrity
@@ -79,7 +197,21 @@ class _Sha256 {
 
   static int _rotr(int x, int n) => ((x >>> n) | (x << (32 - n))) & 0xffffffff;
 
-  String finishHex() {
+  String finishHex() => _compute();
+
+  /// Return the raw 32-byte digest.
+  Uint8List finishBytes() {
+    _compute();
+    final out = Uint8List(32);
+    final bd = ByteData.sublistView(out);
+    for (var i = 0; i < 8; i++) {
+      bd.setUint32(i * 4, _h[i]);
+    }
+    return out;
+  }
+
+  /// Run the compression over the buffered message and return the hex digest.
+  String _compute() {
     final msg = _buf.toBytes();
     final bitLen = msg.length * 8;
     final padded = BytesBuilder()

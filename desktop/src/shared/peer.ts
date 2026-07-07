@@ -14,22 +14,27 @@
 
 import {
   ChannelMessage,
+  ChunkFrame,
   CHUNK_SIZE,
+  decodeChunkFrame,
+  encodeChunkFrame,
   newTransferId,
   SignalMessage,
   TransferInfo,
 } from './protocol';
 import {
+  deriveSAS,
   deriveSessionKey,
   exportPublicKey,
   generateKeyPair,
   importPublicKey,
   KeyPair,
   open as openSealed,
+  openBytes,
+  SAS,
   seal,
+  sealBytes,
   sha256Hex,
-  toBase64Url,
-  fromBase64Url,
 } from './crypto';
 
 /** Minimal WebRTC surface we depend on, so this typechecks under Node too. */
@@ -48,10 +53,13 @@ export interface RTCLike {
 }
 
 export interface RTCDataChannelLike {
-  send(data: string): void;
+  /** Text control frames and binary chunk frames both go through here. */
+  send(data: string | ArrayBuffer | ArrayBufferView): void;
   close(): void;
   readyState: string;
   bufferedAmount: number;
+  /** Set to 'arraybuffer' so inbound binary frames arrive as ArrayBuffer. */
+  binaryType?: string;
   onopen: (() => void) | null;
   onclose: (() => void) | null;
   onmessage: ((ev: { data: unknown }) => void) | null;
@@ -68,6 +76,12 @@ export interface PeerCallbacks {
   onFileComplete(transferId: string, name: string, bytes: Uint8Array): void;
   /** Fired when the encrypted channel is open and ready. */
   onReady?(): void;
+  /**
+   * Fired once the session key is established and the Short Authentication
+   * String is known, so the UI can render the pairing fingerprint for
+   * out-of-band comparison (MITM defence).
+   */
+  onSAS?(sas: SAS): void;
   /** Factory for an RTCPeerConnection (injected for testability). */
   createConnection(): RTCLike;
 }
@@ -91,7 +105,9 @@ export class PeerSession {
   private channel: RTCDataChannelLike | null = null;
   private keyPair: KeyPair | null = null;
   private sessionKey: CryptoKey | null = null;
+  private ownPublicKeyB64: string | null = null;
   private peerPublicKeyB64: string | null = null;
+  private sas: SAS | null = null;
   private readonly outgoing = new Map<string, OutgoingTransfer>();
   private readonly incoming = new Map<string, IncomingTransfer>();
 
@@ -105,6 +121,15 @@ export class PeerSession {
   /** True once the encrypted data channel is open and keyed. */
   get isReady(): boolean {
     return this.channel?.readyState === 'open' && this.sessionKey !== null;
+  }
+
+  /**
+   * The Short Authentication String for this session, or null before the key
+   * is established. Compare it out-of-band with the peer to rule out a relay
+   * that swapped the ECDH keys for a man-in-the-middle.
+   */
+  get shortAuthString(): SAS | null {
+    return this.sas;
   }
 
   /**
@@ -123,6 +148,7 @@ export class PeerSession {
     const offer = await this.pc.createOffer();
     await this.pc.setLocalDescription(offer);
     const pub = await exportPublicKey(this.keyPair.publicKey);
+    this.ownPublicKeyB64 = pub;
     this.cb.send({
       t: 'offer',
       to: this.peerId,
@@ -160,9 +186,11 @@ export class PeerSession {
     const answer = await this.pc.createAnswer();
     await this.pc.setLocalDescription(answer);
 
+    const pub = await exportPublicKey(this.keyPair.publicKey);
+    this.ownPublicKeyB64 = pub;
+
     await this.establishKey();
 
-    const pub = await exportPublicKey(this.keyPair.publicKey);
     this.cb.send({
       t: 'answer',
       to: this.peerId,
@@ -180,9 +208,13 @@ export class PeerSession {
   }
 
   private async establishKey(): Promise<void> {
-    if (!this.keyPair || !this.peerPublicKeyB64) return;
+    if (!this.keyPair || !this.peerPublicKeyB64 || !this.ownPublicKeyB64) return;
     const peerPub = await importPublicKey(this.peerPublicKeyB64);
     this.sessionKey = await deriveSessionKey(this.keyPair.privateKey, peerPub);
+    // Derive the Short Authentication String from both public keys as each side
+    // observed them. A key-swapping relay makes these diverge across peers.
+    this.sas = await deriveSAS(this.ownPublicKeyB64, this.peerPublicKeyB64);
+    this.cb.onSAS?.(this.sas);
   }
 
   /**
@@ -244,6 +276,8 @@ export class PeerSession {
 
   private setupChannel(channel: RTCDataChannelLike): void {
     this.channel = channel;
+    // Ensure inbound binary chunk frames arrive as ArrayBuffer, not Blob.
+    channel.binaryType = 'arraybuffer';
     channel.onopen = () => {
       this.cb.onReady?.();
     };
@@ -255,20 +289,61 @@ export class PeerSession {
     };
   }
 
+  /** Send a JSON control message, AES-GCM-sealed as a base64url string. */
   private async sendChannel(msg: ChannelMessage): Promise<void> {
     if (!this.channel || this.channel.readyState !== 'open' || !this.sessionKey) {
       throw new Error('Data channel not ready');
     }
     const sealed = await seal(this.sessionKey, JSON.stringify(msg));
-    // Apply simple backpressure so we never blow the send buffer on big files.
-    while (this.channel.bufferedAmount > 8 * 1024 * 1024) {
+    await this.applyBackpressure();
+    this.channel.send(sealed);
+  }
+
+  /**
+   * Send a file chunk as a compact binary frame: the plaintext frame is AES-GCM
+   * sealed to raw bytes and pushed as an ArrayBuffer, skipping the JSON +
+   * double-base64 overhead of the v1 string path.
+   */
+  private async sendChunkFrame(frame: ChunkFrame): Promise<void> {
+    if (!this.channel || this.channel.readyState !== 'open' || !this.sessionKey) {
+      throw new Error('Data channel not ready');
+    }
+    const framed = encodeChunkFrame(frame);
+    const sealed = await sealBytes(this.sessionKey, framed);
+    await this.applyBackpressure();
+    // Send a fresh, exactly-sized ArrayBuffer copy of the sealed bytes.
+    const buf = new ArrayBuffer(sealed.byteLength);
+    new Uint8Array(buf).set(sealed);
+    this.channel.send(buf);
+  }
+
+  /** Simple backpressure so we never blow the send buffer on big files. */
+  private async applyBackpressure(): Promise<void> {
+    while (this.channel && this.channel.bufferedAmount > 8 * 1024 * 1024) {
       await delay(20);
     }
-    this.channel.send(sealed);
   }
 
   private async onChannelData(data: unknown): Promise<void> {
     if (!this.sessionKey) return;
+
+    // Binary chunk frame (protocol v2).
+    if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+      const sealed =
+        data instanceof ArrayBuffer
+          ? new Uint8Array(data)
+          : new Uint8Array((data as ArrayBufferView).buffer, (data as ArrayBufferView).byteOffset, (data as ArrayBufferView).byteLength);
+      try {
+        const plainFrame = await openBytes(this.sessionKey, sealed);
+        const frame = decodeChunkFrame(plainFrame);
+        if (frame) await this.onChunkFrame(frame);
+      } catch {
+        // Undecryptable / tampered frame — drop it.
+      }
+      return;
+    }
+
+    // JSON control message.
     if (typeof data !== 'string') return;
     let msg: ChannelMessage;
     try {
@@ -292,9 +367,6 @@ export class PeerSession {
       case 'reject-file':
         this.markState(msg.transferId, 'rejected');
         this.outgoing.delete(msg.transferId);
-        break;
-      case 'chunk':
-        await this.onChunk(msg);
         break;
       case 'complete':
         await this.onComplete(msg);
@@ -352,15 +424,15 @@ export class PeerSession {
     let offset = 0;
     let seq = 0;
     while (offset < bytes.length) {
+      if (out.info.state === 'cancelled') return;
       const end = Math.min(offset + CHUNK_SIZE, bytes.length);
       const slice = bytes.subarray(offset, end);
       const last = end >= bytes.length;
-      await this.sendChannel({
-        t: 'chunk',
+      await this.sendChunkFrame({
         transferId: out.info.transferId,
         seq,
         last,
-        data: toBase64Url(slice),
+        data: slice,
       });
       offset = end;
       seq += 1;
@@ -374,10 +446,11 @@ export class PeerSession {
     this.outgoing.delete(out.info.transferId);
   }
 
-  private async onChunk(msg: Extract<ChannelMessage, { t: 'chunk' }>): Promise<void> {
-    const inc = this.incoming.get(msg.transferId);
+  private async onChunkFrame(frame: ChunkFrame): Promise<void> {
+    const inc = this.incoming.get(frame.transferId);
     if (!inc) return;
-    const bytes = fromBase64Url(msg.data);
+    // Copy out of the (possibly reused) receive buffer before retaining it.
+    const bytes = frame.data.slice();
     inc.chunks.push(bytes);
     inc.received += bytes.length;
     inc.info.transferred = inc.received;

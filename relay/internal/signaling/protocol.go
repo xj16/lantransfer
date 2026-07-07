@@ -9,8 +9,11 @@ package signaling
 
 import "encoding/json"
 
-// ProtocolVersion must match PROTOCOL_VERSION on the clients.
-const ProtocolVersion = 1
+// ProtocolVersion must match PROTOCOL_VERSION on the clients. v2 introduced
+// binary data-channel chunk frames on the clients; the relay is agnostic to
+// channel payloads (it never inspects them) but the signaling handshake still
+// gates version compatibility here.
+const ProtocolVersion = 2
 
 // Platform identifies the kind of peer that connected.
 type Platform string

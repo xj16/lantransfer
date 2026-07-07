@@ -1,0 +1,55 @@
+# One-command self-hosting for the LanTransfer relay.
+#
+#   docker compose up -d
+#
+# By default this brings up ONLY the relay on ws://localhost:8080/ws — perfect
+# for a LAN box or quick testing. To expose a public wss:// endpoint with an
+# automatic Let's Encrypt certificate, set RELAY_DOMAIN and enable the `tls`
+# profile:
+#
+#   RELAY_DOMAIN=relay.example.com docker compose --profile tls up -d
+#
+# Caddy then terminates TLS and forwards to the relay; the relay only sees
+# presence + the opaque WebRTC handshake, never a single file byte.
+
+services:
+  relay:
+    build:
+      context: ./relay
+    image: lantransfer-relay:latest
+    restart: unless-stopped
+    environment:
+      LANTRANSFER_ADDR: ":8080"
+      # Hardening knobs (see relay/README.md). Empty origin = any (LAN default).
+      LANTRANSFER_ORIGIN: "${LANTRANSFER_ORIGIN:-}"
+      LANTRANSFER_MAX_CONNS_PER_IP: "${LANTRANSFER_MAX_CONNS_PER_IP:-32}"
+      LANTRANSFER_MAX_MSGS_PER_SEC: "${LANTRANSFER_MAX_MSGS_PER_SEC:-40}"
+      LANTRANSFER_MAX_PEERS_PER_ROOM: "${LANTRANSFER_MAX_PEERS_PER_ROOM:-16}"
+    # Publish the plain ws port for LAN use. Behind the `tls` profile you can
+    # drop this and let Caddy be the only public surface.
+    ports:
+      - "${RELAY_PORT:-8080}:8080"
+    # The relay ships on a distroless image (no shell/wget), so container-level
+    # HEALTHCHECK isn't used here — probe GET /health from your orchestrator or
+    # uptime monitor instead (returns {"status":"ok",...}).
+
+  # Optional TLS front. `docker compose --profile tls up` to enable.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    restart: unless-stopped
+    depends_on:
+      - relay
+    environment:
+      RELAY_DOMAIN: "${RELAY_DOMAIN:?set RELAY_DOMAIN to your public hostname}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

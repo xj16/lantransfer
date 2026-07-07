@@ -43,6 +43,61 @@ void main() {
     });
   });
 
+  group('sha256Bytes', () {
+    test('matches the hex digest for "abc"', () {
+      final bytes = sha256Bytes(Uint8List.fromList(utf8.encode('abc')));
+      final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+      expect(hex, equals('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'));
+    });
+  });
+
+  group('deriveSas (Short Authentication String)', () {
+    test('is symmetric regardless of key order', () {
+      const a = 'AAAA-public-key';
+      const b = 'ZZZZ-public-key';
+      final s1 = deriveSas(a, b);
+      final s2 = deriveSas(b, a);
+      expect(s1.emoji, equals(s2.emoji));
+      expect(s1.digits, equals(s2.digits));
+      expect(s1.emoji.length, equals(4));
+      expect(RegExp(r'^\d{6}$').hasMatch(s1.digits), isTrue);
+    });
+
+    test('diverges when a key is swapped (the MITM signal)', () {
+      final honest = deriveSas('alice', 'bob');
+      final mitm = deriveSas('alice', 'eve');
+      expect(mitm.digits, isNot(equals(honest.digits)));
+    });
+  });
+
+  group('binary chunk frame codec', () {
+    test('round-trips through encode/decode', () {
+      final data = Uint8List.fromList(List<int>.generate(1000, (i) => (i * 7 + 3) & 0xff));
+      final encoded = encodeChunkFrame(
+        ChunkFrame('00112233445566778899aabbccddeeff', 42, true, data),
+      );
+      expect(encoded[0], equals(binaryFrameMagic));
+
+      final decoded = decodeChunkFrame(encoded)!;
+      expect(decoded.transferId, equals('00112233445566778899aabbccddeeff'));
+      expect(decoded.seq, equals(42));
+      expect(decoded.last, isTrue);
+      expect(decoded.data, equals(data));
+    });
+
+    test('rejects a buffer lacking the magic byte', () {
+      expect(decodeChunkFrame(Uint8List.fromList([0, 1, 2, 3])), isNull);
+    });
+
+    test('adds only a fixed 22-byte header of overhead', () {
+      final data = Uint8List(64 * 1024);
+      final encoded = encodeChunkFrame(
+        ChunkFrame('00112233445566778899aabbccddeeff', 0, false, data),
+      );
+      expect(encoded.length, equals(data.length + 22));
+    });
+  });
+
   group('protocol', () {
     test('pairing codes have the adjective-noun-number shape', () {
       final code = generatePairingCode();

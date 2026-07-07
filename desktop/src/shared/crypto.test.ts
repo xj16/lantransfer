@@ -1,11 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import {
+  deriveSAS,
   deriveSessionKey,
   exportPublicKey,
   generateKeyPair,
   importPublicKey,
   open,
+  openBytes,
   seal,
+  sealBytes,
   sha256Hex,
   toBase64Url,
   fromBase64Url,
@@ -88,5 +91,67 @@ describe('ECDH + AES-GCM end-to-end', () => {
 
     const sealed = await seal(aliceKey, 'top secret');
     await expect(open(eveKey, sealed)).rejects.toThrow();
+  });
+});
+
+describe('sealBytes / openBytes (binary hot path)', () => {
+  it('round-trips raw bytes without a base64 layer', async () => {
+    const alice = await generateKeyPair();
+    const bob = await generateKeyPair();
+    const aliceKey = await deriveSessionKey(
+      alice.privateKey,
+      await importPublicKey(await exportPublicKey(bob.publicKey)),
+    );
+    const bobKey = await deriveSessionKey(
+      bob.privateKey,
+      await importPublicKey(await exportPublicKey(alice.publicKey)),
+    );
+
+    const payload = new Uint8Array(65_536);
+    for (let i = 0; i < payload.length; i++) payload[i] = (i * 13 + 5) & 0xff;
+
+    const sealed = await sealBytes(aliceKey, payload);
+    // 12-byte nonce + ciphertext + 16-byte GCM tag: no base64 inflation.
+    expect(sealed.length).toBe(payload.length + 12 + 16);
+
+    const opened = await openBytes(bobKey, sealed);
+    expect(Array.from(opened)).toEqual(Array.from(payload));
+  });
+
+  it('rejects a tampered binary frame', async () => {
+    const alice = await generateKeyPair();
+    const key = await deriveSessionKey(
+      alice.privateKey,
+      await importPublicKey(await exportPublicKey(alice.publicKey)),
+    );
+    const sealed = await sealBytes(key, new Uint8Array([1, 2, 3, 4]));
+    sealed[sealed.length - 1] ^= 0xff;
+    await expect(openBytes(key, sealed)).rejects.toThrow();
+  });
+});
+
+describe('deriveSAS (Short Authentication String)', () => {
+  it('is symmetric: both peers derive the same SAS regardless of order', async () => {
+    const alicePub = await exportPublicKey((await generateKeyPair()).publicKey);
+    const bobPub = await exportPublicKey((await generateKeyPair()).publicKey);
+
+    const fromAlice = await deriveSAS(alicePub, bobPub);
+    const fromBob = await deriveSAS(bobPub, alicePub);
+
+    expect(fromAlice.emoji).toEqual(fromBob.emoji);
+    expect(fromAlice.digits).toEqual(fromBob.digits);
+    expect(fromAlice.emoji).toHaveLength(4);
+    expect(fromAlice.digits).toMatch(/^\d{6}$/);
+  });
+
+  it('diverges when a key is swapped (the MITM signal)', async () => {
+    const alicePub = await exportPublicKey((await generateKeyPair()).publicKey);
+    const bobPub = await exportPublicKey((await generateKeyPair()).publicKey);
+    const evePub = await exportPublicKey((await generateKeyPair()).publicKey);
+
+    const honest = await deriveSAS(alicePub, bobPub);
+    const mitm = await deriveSAS(alicePub, evePub);
+
+    expect(mitm.digits).not.toEqual(honest.digits);
   });
 });

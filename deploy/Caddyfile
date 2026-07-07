@@ -1,0 +1,16 @@
+# Caddy fronts the LanTransfer relay with automatic HTTPS, so clients get a
+# stable wss:// endpoint (required for WebRTC signaling from a browser tab on an
+# https:// page). Caddy fetches and renews a Let's Encrypt certificate for
+# $RELAY_DOMAIN on its own.
+#
+# Point your clients at:  wss://$RELAY_DOMAIN/ws
+
+{$RELAY_DOMAIN} {
+	encode gzip
+
+	# WebSocket signaling + health/metrics, reverse-proxied to the relay.
+	reverse_proxy relay:8080 {
+		# Preserve the real client IP so the relay's per-IP limits are accurate.
+		header_up X-Forwarded-For {remote_host}
+	}
+}

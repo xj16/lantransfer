@@ -33,7 +33,22 @@ class AesGcmCipher implements SessionCipher {
 
   @override
   Future<String> open(String sealed) async {
-    final bytes = fromBase64Url(sealed);
+    return utf8.decode(await openBytes(fromBase64Url(sealed)));
+  }
+
+  @override
+  Future<Uint8List> sealBytes(Uint8List plaintext) async {
+    final box = await _aead.encrypt(plaintext, secretKey: _secretKey);
+    // Layout on the wire: nonce(12) || ciphertext || tag(16).
+    final out = BytesBuilder()
+      ..add(box.nonce)
+      ..add(box.cipherText)
+      ..add(box.mac.bytes);
+    return out.toBytes();
+  }
+
+  @override
+  Future<Uint8List> openBytes(Uint8List bytes) async {
     if (bytes.length < 12 + 16) {
       throw ArgumentError('ciphertext too short');
     }
@@ -42,7 +57,7 @@ class AesGcmCipher implements SessionCipher {
     final cipherText = bytes.sublist(12, bytes.length - 16);
     final box = SecretBox(cipherText, nonce: nonce, mac: Mac(tag));
     final clear = await _aead.decrypt(box, secretKey: _secretKey);
-    return utf8.decode(clear);
+    return Uint8List.fromList(clear);
   }
 }
 
@@ -65,6 +80,27 @@ class EcdhKeyAgreement implements KeyAgreement {
   static Future<EcdhKeyAgreement> generate() async {
     final keyPair = await _algorithm.newKeyPair();
     final pub = await keyPair.extractPublicKey();
+    final encoded = _encodePublic(pub);
+    return EcdhKeyAgreement._(keyPair, toBase64Url(encoded));
+  }
+
+  /// Reconstruct a key agreement from pinned P-256 scalar coordinates (the JWK
+  /// `d`, `x`, `y` values). Used by the cross-platform interop test to load the
+  /// exact key material the desktop reference generated, so both platforms
+  /// derive an identical session key. `d`, `x`, `y` are big-endian 32-byte
+  /// scalars.
+  static Future<EcdhKeyAgreement> fromKeyPairData(
+    List<int> d,
+    List<int> x,
+    List<int> y,
+  ) async {
+    final keyPair = EcKeyPairData(
+      d: d,
+      x: x,
+      y: y,
+      type: KeyPairType.p256,
+    );
+    final pub = EcPublicKey(x: x, y: y, type: KeyPairType.p256);
     final encoded = _encodePublic(pub);
     return EcdhKeyAgreement._(keyPair, toBase64Url(encoded));
   }

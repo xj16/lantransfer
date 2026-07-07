@@ -49,10 +49,16 @@ class PeerSession {
   SessionCipher? _cipher;
   TransferEngine? _engine;
   String? _peerPublicKey;
+  Sas? _sas;
   final _readyCompleter = Completer<void>();
 
   Future<void> get onReady => _readyCompleter.future;
   bool get isReady => _cipher != null && _channel?.state == RTCDataChannelState.RTCDataChannelOpen;
+
+  /// The Short Authentication String for this session (null before the key is
+  /// established). Compare it out-of-band with the peer to rule out a relay that
+  /// swapped the ECDH keys for a man-in-the-middle.
+  Sas? get shortAuthString => _sas;
 
   /// Initiate the connection (offerer). Creates the data channel and sends an
   /// SDP offer with our public key embedded.
@@ -125,9 +131,13 @@ class PeerSession {
   Future<void> _establishKey() async {
     if (_agreement == null || _peerPublicKey == null) return;
     _cipher = await _agreement!.deriveCipher(_peerPublicKey!);
+    // Derive the Short Authentication String from both public keys as each side
+    // observed them — a key-swapping relay makes these diverge across peers.
+    _sas = deriveSas(_agreement!.publicKeyB64, _peerPublicKey!);
     _engine = TransferEngine(
       cipher: _cipher!,
       send: (sealed) => _channel?.send(RTCDataChannelMessage(sealed)),
+      sendBinary: (frame) => _channel?.send(RTCDataChannelMessage.fromBinary(frame)),
       onUpdate: onUpdate,
       onIncoming: onIncoming,
       onComplete: onComplete,
@@ -157,7 +167,10 @@ class PeerSession {
     };
     channel.onMessage = (message) {
       final engine = _engine;
-      if (engine != null && message.isBinary == false) {
+      if (engine == null) return;
+      if (message.isBinary) {
+        engine.onBinaryData(message.binary);
+      } else {
         engine.onChannelData(message.text);
       }
     };

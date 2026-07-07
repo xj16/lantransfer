@@ -8,7 +8,11 @@ library;
 import 'dart:math';
 
 /// Protocol version. Peers refuse to pair across a major-version mismatch.
-const int protocolVersion = 1;
+///
+/// v2 introduces binary data-channel chunk frames (see [encodeChunkFrame] in
+/// crypto.dart) that replace the v1 double-base64 JSON `chunk` message on the
+/// throughput hot path. Control messages remain JSON.
+const int protocolVersion = 2;
 
 /// Preferred plaintext chunk size (bytes) before encryption.
 const int chunkSize = 64 * 1024;

@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PeerSession, PeerCallbacks, RTCLike } from '../../shared/peer';
 import { RelayClient } from '../../shared/relayClient';
+import type { SAS } from '../../shared/crypto';
 import {
   Platform,
   SignalMessage,
@@ -23,6 +24,12 @@ export interface DiscoveredPeer {
   platform: Platform;
 }
 
+/** A peer's verification fingerprint, once the encrypted channel is keyed. */
+export interface PeerSAS {
+  peerId: string;
+  sas: SAS;
+}
+
 export interface IncomingPrompt {
   info: TransferInfo;
   resolve: (accept: boolean) => void;
@@ -35,6 +42,8 @@ interface State {
   selfId: string;
   incoming: IncomingPrompt | null;
   config: AppConfig | null;
+  /** Verification fingerprint per keyed peer (for out-of-band MITM checks). */
+  fingerprints: Record<string, SAS>;
 }
 
 function makeSelfId(): string {
@@ -56,6 +65,7 @@ export function useLanTransfer() {
     selfId: makeSelfId(),
     incoming: null,
     config: null,
+    fingerprints: {},
   });
 
   const relayRef = useRef<RelayClient | null>(null);
@@ -73,7 +83,7 @@ export function useLanTransfer() {
   }, []);
 
   const buildCallbacks = useCallback(
-    (): PeerCallbacks => ({
+    (peerId: string): PeerCallbacks => ({
       send: (msg: SignalMessage) => relayRef.current?.send(msg),
       onTransferUpdate: upsertTransfer,
       onIncomingFile: (info) =>
@@ -84,6 +94,9 @@ export function useLanTransfer() {
         const dataBase64 = uint8ToBase64(bytes);
         void window.lantransfer.saveFile({ name, dataBase64 });
       },
+      onSAS: (sas) => {
+        setState((s) => ({ ...s, fingerprints: { ...s.fingerprints, [peerId]: sas } }));
+      },
       createConnection,
     }),
     [upsertTransfer],
@@ -93,7 +106,7 @@ export function useLanTransfer() {
     (peer: DiscoveredPeer, initiate: boolean): PeerSession => {
       let session = sessionsRef.current.get(peer.peerId);
       if (!session) {
-        session = new PeerSession(state.selfId, peer.peerId, peer.name, buildCallbacks());
+        session = new PeerSession(state.selfId, peer.peerId, peer.name, buildCallbacks(peer.peerId));
         sessionsRef.current.set(peer.peerId, session);
         if (initiate) void session.connect();
       }
@@ -137,7 +150,15 @@ export function useLanTransfer() {
           });
           break;
         case 'peer-left':
-          setState((s) => ({ ...s, peers: s.peers.filter((p) => p.peerId !== msg.peerId) }));
+          setState((s) => {
+            const fingerprints = { ...s.fingerprints };
+            delete fingerprints[msg.peerId];
+            return {
+              ...s,
+              peers: s.peers.filter((p) => p.peerId !== msg.peerId),
+              fingerprints,
+            };
+          });
           sessionsRef.current.get(msg.peerId)?.close();
           sessionsRef.current.delete(msg.peerId);
           break;

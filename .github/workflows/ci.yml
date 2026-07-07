@@ -23,8 +23,8 @@ jobs:
       - run: npm ci
       - name: Type-check
         run: npm run typecheck
-      - name: Unit tests
-        run: npm test
+      - name: Unit tests + coverage
+        run: npm run test:coverage
       - name: Build (main + preload + renderer)
         run: npm run build
 
@@ -46,6 +46,32 @@ jobs:
         run: go test ./...
       - name: Build
         run: go build -o /tmp/lantransfer-relay ./cmd/relay
+
+  web:
+    name: Web (browser client + static demo)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Type-check
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: Build standalone static bundle
+        run: npm run build
+      - name: Upload static demo bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-demo
+          path: web/dist
 
   mobile:
     name: Mobile (Flutter + Dart)

@@ -13,6 +13,7 @@ export function App(): React.JSX.Element {
     selfId,
     incoming,
     config,
+    fingerprints,
     sendFilesTo,
     answerIncoming,
     updateConfig,
@@ -57,7 +58,12 @@ export function App(): React.JSX.Element {
           ) : (
             <div className="peer-grid">
               {peers.map((p) => (
-                <PeerCard key={p.peerId} peer={p} onSend={sendFilesTo} />
+                <PeerCard
+                  key={p.peerId}
+                  peer={p}
+                  onSend={sendFilesTo}
+                  sas={fingerprints[p.peerId]}
+                />
               ))}
             </div>
           )}
