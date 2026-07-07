@@ -55,7 +55,7 @@ class EcdhKeyAgreement implements KeyAgreement {
   static final _hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
   static final _info = utf8.encode('lantransfer/v1/session-key');
 
-  final SimpleKeyPair _keyPair;
+  final EcKeyPair _keyPair;
   final String _publicKeyB64;
 
   @override
@@ -87,22 +87,50 @@ class EcdhKeyAgreement implements KeyAgreement {
   /// Encode a P-256 public key as uncompressed X9.62 (0x04 || X || Y) wrapped
   /// in the same SPKI/DER header the desktop WebCrypto `exportKey('spki')`
   /// emits, so both platforms exchange byte-identical public keys.
-  static Uint8List _encodePublic(SimplePublicKey pub) {
-    // cryptography returns the 65-byte uncompressed point; prepend the fixed
-    // 26-byte SPKI prefix for id-ecPublicKey over prime256v1.
-    final point = Uint8List.fromList(pub.bytes);
+  static Uint8List _encodePublic(EcPublicKey pub) {
+    // `cryptography` exposes the affine coordinates X and Y separately (each a
+    // big-endian 32-byte scalar for P-256). Assemble the 65-byte uncompressed
+    // point (0x04 || X || Y) and prepend the fixed 26-byte SPKI prefix for
+    // id-ecPublicKey over prime256v1.
     final out = BytesBuilder()
       ..add(_spkiP256Prefix)
-      ..add(point);
+      ..addByte(0x04)
+      ..add(_fixedLen(pub.x, 32))
+      ..add(_fixedLen(pub.y, 32));
     return out.toBytes();
   }
 
-  static SimplePublicKey _decodePublic(Uint8List spki) {
-    // Strip the SPKI prefix back down to the raw 65-byte point.
-    final point = spki.length > _spkiP256Prefix.length
-        ? spki.sublist(_spkiP256Prefix.length)
-        : spki;
-    return SimplePublicKey(point, type: KeyPairType.p256);
+  static EcPublicKey _decodePublic(Uint8List spki) {
+    // Strip the SPKI prefix and the 0x04 uncompressed-point marker, then split
+    // the remaining 64 bytes back into the X and Y coordinates.
+    final prefixLen = _spkiP256Prefix.length;
+    final point = spki.length > prefixLen ? spki.sublist(prefixLen) : spki;
+    // Drop the leading 0x04 uncompressed marker if present.
+    final xy = (point.isNotEmpty && point[0] == 0x04)
+        ? point.sublist(1)
+        : point;
+    if (xy.length != 64) {
+      throw ArgumentError('unexpected P-256 public key length: ${xy.length}');
+    }
+    return EcPublicKey(
+      x: Uint8List.sublistView(xy, 0, 32),
+      y: Uint8List.sublistView(xy, 32, 64),
+      type: KeyPairType.p256,
+    );
+  }
+
+  /// Left-pad (or trim) a big-endian scalar to exactly [len] bytes so the wire
+  /// encoding is stable regardless of leading-zero stripping.
+  static Uint8List _fixedLen(List<int> bytes, int len) {
+    if (bytes.length == len) return Uint8List.fromList(bytes);
+    final out = Uint8List(len);
+    if (bytes.length < len) {
+      out.setRange(len - bytes.length, len, bytes);
+    } else {
+      // Trim leading bytes (should only ever be leading zeros).
+      out.setRange(0, len, bytes.sublist(bytes.length - len));
+    }
+    return out;
   }
 
   /// The constant 26-byte DER prefix WebCrypto uses for an SPKI-wrapped,
